@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Room {{ room_id }}</title>
+</head>
+<body>
+    <h1>Room ID: {{ room_id }}</h1>
+    <video id="localVideo" autoplay muted></video>
+    <div id="remoteVideos"></div>
+
+    <form id="messageForm">
+        <input id="message" autocomplete="off" placeholder="Type a message...">
+        <button type="submit">Send</button>
+    </form>
+    <ul id="messages"></ul>
+
+    <button id="leaveButton">Leave Meeting</button>
+
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+    <script>
+        var socket = io();
+        var room = "{{ room_id }}";
+        var username = prompt("Enter your name");
+
+        socket.emit('join', { username: username, room: room });
+
+        var localVideo = document.getElementById('localVideo');
+        var remoteVideos = document.getElementById('remoteVideos');
+        var localStream;
+        var peerConnections = {};
+
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+            .then(stream => {
+                localVideo.srcObject = stream;
+                localStream = stream;
+
+                socket.on('new_peer', (data) => {
+                    createOffer(data.username);
+                });
+
+                socket.on('offer', async (data) => {
+                    var peerConnection = createPeerConnection(data.sender);
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                    var answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    socket.emit('answer', {
+                        answer: answer,
+                        room: room,
+                        sender: username
+                    });
+                });
+
+                socket.on('answer', async (data) => {
+                    var peerConnection = peerConnections[data.sender];
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                });
+
+                socket.on('ice-candidate', async (data) => {
+                    var peerConnection = peerConnections[data.sender];
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                });
+
+                socket.on('user_left', function(data) {
+                    var messageItem = document.createElement('li');
+                    messageItem.textContent = `${data.username} has left the meeting.`;
+                    document.getElementById('messages').appendChild(messageItem);
+
+                    if (peerConnections[data.username]) {
+                        peerConnections[data.username].close();
+                        delete peerConnections[data.username];
+                    }
+
+                    // Remove the video element of the user who left
+                    var remoteVideo = document.getElementById(data.username);
+                    if (remoteVideo) {
+                        remoteVideos.removeChild(remoteVideo);
+                    }
+                });
+            }).catch(error => {
+                console.error('Error accessing media devices.', error);
+            });
+
+        function createPeerConnection(sender) {
+            var peerConnection = new RTCPeerConnection();
+            peerConnections[sender] = peerConnection;
+
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    socket.emit('ice-candidate', {
+                        candidate: event.candidate,
+                        room: room,
+                        sender: username
+                    });
+                }
+            };
+
+            peerConnection.ontrack = event => {
+                var remoteVideo = document.createElement('video');
+                remoteVideo.id = sender;
+                remoteVideo.srcObject = event.streams[0];
+                remoteVideo.autoplay = true;
+                remoteVideos.appendChild(remoteVideo);
+            };
+
+            return peerConnection;
+        }
+
+        async function createOffer(recipient) {
+            var peerConnection = createPeerConnection(recipient);
+            var offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            socket.emit('offer', {
+                offer: offer,
+                room: room,
+                sender: username
+            });
+        }
+
+        // Handle form submission
+        var form = document.getElementById('messageForm');
+        var input = document.getElementById('message');
+        var messages = document.getElementById('messages');
+
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+            if (input.value) {
+                socket.emit('message', { msg: input.value, room: room, username: username });
+                input.value = '';
+            }
+        });
+
+        socket.on('message', function(data) {
+            var item = document.createElement('li');
+            item.textContent = `${data.username}: ${data.msg}`;
+            messages.appendChild(item);
+        });
+
+        // Handle "Leave Meeting" button click
+        var leaveButton = document.getElementById('leaveButton');
+        leaveButton.addEventListener('click', function() {
+            socket.emit('leave', { username: username, room: room });
+
+            // Close all peer connections
+            for (let peer in peerConnections) {
+                peerConnections[peer].close();
+            }
+
+            // Stop all local tracks
+            localStream.getTracks().forEach(track => track.stop());
+
+            // Redirect to the home page or another page
+            window.location.href = '/';
+        });
+    </script>
+</body>
+</html>
